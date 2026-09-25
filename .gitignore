@@ -1,0 +1,33 @@
+# Password Vault & Local Data
+*.db
+*.sqlite
+*.sqlite3
+vault.db
+*.key
+
+# Go Binaries & Build Outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+main
+
+# Environment & Local Secrets
+.env
+*.env
+config.local.json
+
+# IDEs & Editor Configs
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Test Coverage & Tooling Artifacts
+*.out
+*.test
+*.prof
