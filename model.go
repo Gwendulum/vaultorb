@@ -29,6 +29,14 @@ const (
 	statusError
 )
 
+type undoActionType int
+
+const (
+	undoActionRegister = iota
+	undoActionUpdate
+	undoActionDelete
+)
+
 type statusMessage struct {
 	text string
 	kind statusType
@@ -45,13 +53,17 @@ func (m menuItem) Title() string {
 }
 
 type listEntry struct {
-	row db.ListEntriesRow
+	row db.Entry
 }
 
 func (l listEntry) Title() string {
 	return l.row.Domain + " " + l.row.Username
 }
 
+type historyEntry struct {
+	Kind    undoActionType
+	payload db.Entry
+}
 type model struct {
 	activeScreen  currentScreen
 	masterKey     []byte
@@ -65,6 +77,8 @@ type model struct {
 	svc           services
 	password      string
 	status        statusMessage
+	undoHistory   []historyEntry
+	redoHistory   []historyEntry
 }
 
 func initialModel(svc services) model {
@@ -140,7 +154,7 @@ func registerCmd(dbQ *db.Queries, domUserPass string, masterKey []byte) tea.Cmd 
 	}
 }
 
-type listMsg cmdMsg[[]db.ListEntriesRow]
+type listMsg cmdMsg[[]db.Entry]
 
 func listCmd(dbQ *db.Queries) tea.Cmd {
 	return func() tea.Msg {
@@ -152,17 +166,18 @@ func listCmd(dbQ *db.Queries) tea.Cmd {
 	}
 }
 
-type deleteMsg cmdMsg[string]
+type deleteMsg cmdMsg[db.Entry]
 
 func deleteCmd(dbQ *db.Queries, domUser string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		splitString := strings.Fields(domUser)
-		err := deletePassword(ctx, dbQ, splitString)
+		entry, err := deletePassword(ctx, dbQ, splitString)
 		if err != nil {
 			return deleteMsg{err: err}
 		}
-		return deleteMsg{data: "Deletion successful!"}
+
+		return deleteMsg{data: entry}
 
 	}
 }
@@ -176,6 +191,25 @@ func generateCmd(svc services) tea.Cmd {
 			return generateMsg{err: err}
 		}
 		return generateMsg{data: password}
+	}
+}
+
+type restoreMsg cmdMsg[db.Entry]
+
+func restoreCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		restoredRow, err := dbQ.RestoreEntry(ctx, db.RestoreEntryParams{
+			ID:                entry.payload.ID,
+			Domain:            entry.payload.Domain,
+			Username:          entry.payload.Username,
+			EncryptedPassword: entry.payload.EncryptedPassword,
+			CreatedAt:         entry.payload.CreatedAt,
+		})
+		if err != nil {
+			return restoreMsg{err: err}
+		}
+		return restoreMsg{data: restoredRow}
 	}
 }
 
@@ -199,9 +233,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDelete(msg)
 	case generateMsg:
 		return m.handleGenerate(msg)
+	case restoreMsg:
+		return m.handleRestore(msg)
 	}
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+z" {
+		entry, err := m.popUndo()
+		if err != nil {
+			m.status.kind = statusError
+			m.status.text = err.Error()
+			return m, nil
+		}
+
+		switch entry.Kind {
+		case undoActionDelete:
+			return m, restoreCmd(m.svc.dbQ, entry)
+		case undoActionRegister:
+		case undoActionUpdate:
+		}
 	}
 
 	switch m.activeScreen {
@@ -367,7 +418,7 @@ func (m model) handleDelete(msg deleteMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	m.status.kind = statusSuccess
-	m.status.text = msg.data
+	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionDelete, payload: msg.data})
 	return m, listCmd(m.svc.dbQ)
 }
 
@@ -380,6 +431,16 @@ func (m model) handleGenerate(msg generateMsg) (model, tea.Cmd) {
 	m.status.kind = statusSuccess
 	m.passwordInput.SetValue(msg.data)
 	return m, nil
+}
+
+func (m model) handleRestore(msg restoreMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.status.text = msg.err.Error()
+		m.status.kind = statusError
+	}
+	m.status.kind = statusSuccess
+	m.status.text = "entry restored successfully"
+	return m, listCmd(m.svc.dbQ)
 }
 
 func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
@@ -629,4 +690,14 @@ func (m model) ChoiceValidation() (item, bool) {
 	m.status.text = ""
 	m.status.kind = statusNone
 	return m.choices[m.cursor], true
+}
+
+func (m *model) popUndo() (historyEntry, error) {
+	n := len(m.undoHistory)
+	if n <= 0 {
+		return historyEntry{}, fmt.Errorf("nothing to undo")
+	}
+	entry := m.undoHistory[n-1]
+	m.undoHistory = m.undoHistory[:len(m.undoHistory)-1]
+	return entry, nil
 }

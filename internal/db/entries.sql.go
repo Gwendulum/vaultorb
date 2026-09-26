@@ -98,27 +98,27 @@ func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) ([]byte, err
 }
 
 const listEntries = `-- name: ListEntries :many
-SELECT domain, username, created_at
+SELECT id, domain, username, encrypted_password, created_at
 FROM entries
 ORDER BY domain ASC, username ASC
 `
 
-type ListEntriesRow struct {
-	Domain    string
-	Username  string
-	CreatedAt time.Time
-}
-
-func (q *Queries) ListEntries(ctx context.Context) ([]ListEntriesRow, error) {
+func (q *Queries) ListEntries(ctx context.Context) ([]Entry, error) {
 	rows, err := q.db.QueryContext(ctx, listEntries)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListEntriesRow
+	var items []Entry
 	for rows.Next() {
-		var i ListEntriesRow
-		if err := rows.Scan(&i.Domain, &i.Username, &i.CreatedAt); err != nil {
+		var i Entry
+		if err := rows.Scan(
+			&i.ID,
+			&i.Domain,
+			&i.Username,
+			&i.EncryptedPassword,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -130,4 +130,43 @@ func (q *Queries) ListEntries(ctx context.Context) ([]ListEntriesRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const restoreEntry = `-- name: RestoreEntry :one
+INSERT INTO entries (id, domain, username, encrypted_password, created_at)
+VALUES (
+    ?1,
+    ?2,
+    ?3,
+	?4,
+    ?5
+)
+RETURNING id, domain, username, encrypted_password, created_at
+`
+
+type RestoreEntryParams struct {
+	ID                int64
+	Domain            string
+	Username          string
+	EncryptedPassword []byte
+	CreatedAt         time.Time
+}
+
+func (q *Queries) RestoreEntry(ctx context.Context, arg RestoreEntryParams) (Entry, error) {
+	row := q.db.QueryRowContext(ctx, restoreEntry,
+		arg.ID,
+		arg.Domain,
+		arg.Username,
+		arg.EncryptedPassword,
+		arg.CreatedAt,
+	)
+	var i Entry
+	err := row.Scan(
+		&i.ID,
+		&i.Domain,
+		&i.Username,
+		&i.EncryptedPassword,
+		&i.CreatedAt,
+	)
+	return i, err
 }

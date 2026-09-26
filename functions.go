@@ -54,7 +54,7 @@ func getPassword(ctx context.Context, dbQ *db.Queries, args []string, masterKey 
 
 }
 
-func listPassword(ctx context.Context, dbQ *db.Queries) ([]db.ListEntriesRow, error) {
+func listPassword(ctx context.Context, dbQ *db.Queries) ([]db.Entry, error) {
 	list, err := dbQ.ListEntries(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("cmdList: %w", err)
@@ -63,22 +63,22 @@ func listPassword(ctx context.Context, dbQ *db.Queries) ([]db.ListEntriesRow, er
 	return list, nil
 }
 
-func deletePassword(ctx context.Context, dbQ *db.Queries, args []string) error {
+func deletePassword(ctx context.Context, dbQ *db.Queries, args []string) (db.Entry, error) {
 	if len(args) != 2 {
-		return fmt.Errorf("Entry deletion requires domain and username\n")
+		return db.Entry{}, fmt.Errorf("Entry deletion requires domain and username\n")
 	}
 
 	domain := args[0]
 	username := args[1]
 
-	_, err := dbQ.DeleteEntry(ctx, db.DeleteEntryParams{
+	entry, err := dbQ.DeleteEntry(ctx, db.DeleteEntryParams{
 		Domain:   domain,
 		Username: username,
 	})
 	if err != nil {
-		return fmt.Errorf("error deleting entry\n")
+		return db.Entry{}, fmt.Errorf("error deleting entry\n")
 	}
-	return nil
+	return entry, nil
 }
 
 func generatePassword(svc services) (string, error) {
