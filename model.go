@@ -140,17 +140,17 @@ func getCmd(dbQ *db.Queries, domUser string, masterKey []byte) tea.Cmd {
 	}
 }
 
-type regMsg cmdMsg[string]
+type regMsg cmdMsg[db.Entry]
 
 func registerCmd(dbQ *db.Queries, domUserPass string, masterKey []byte) tea.Cmd {
 	return func() tea.Msg {
 		splitString := strings.Fields(domUserPass)
 		ctx := context.Background()
-		msg, err := registerPassword(ctx, dbQ, splitString, masterKey)
+		entry, err := registerPassword(ctx, dbQ, splitString, masterKey)
 		if err != nil {
 			return regMsg{err: err}
 		}
-		return regMsg{data: msg}
+		return regMsg{data: entry}
 	}
 }
 
@@ -213,6 +213,21 @@ func restoreCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
 	}
 }
 
+type redeleteMsg cmdMsg[db.Entry]
+
+func redeleteCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		deletedEntry, err := dbQ.DeleteEntry(ctx, db.DeleteEntryParams{
+			Domain:   entry.payload.Domain,
+			Username: entry.payload.Username,
+		})
+		if err != nil {
+			return redeleteMsg{err: err}
+		}
+		return redeleteMsg{data: deletedEntry}
+	}
+}
 func (m model) Init() tea.Cmd {
 	return textinput.Blink
 }
@@ -235,12 +250,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleGenerate(msg)
 	case restoreMsg:
 		return m.handleRestore(msg)
+	case redeleteMsg:
+		return m.handleRedelete(msg)
 	}
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
-	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+z" {
-		entry, err := m.popUndo()
+
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && (keyMsg.String() == "ctrl+z" || keyMsg.String() == "ctrl+r") {
+		var entry historyEntry
+		var err error
+		switch keyMsg.String() {
+		case "ctrl+z":
+			m, entry, err = m.popUndo()
+		case "ctrl+r":
+			m, entry, err = m.popRedo()
+		}
 		if err != nil {
 			m.status.kind = statusError
 			m.status.text = err.Error()
@@ -251,10 +276,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case undoActionDelete:
 			return m, restoreCmd(m.svc.dbQ, entry)
 		case undoActionRegister:
+			return m, redeleteCmd(m.svc.dbQ, entry)
 		case undoActionUpdate:
 		}
 	}
-
 	switch m.activeScreen {
 
 	case screenLogin:
@@ -388,7 +413,9 @@ func (m model) handleReg(msg regMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	m.status.kind = statusSuccess
-	m.status.text = fmt.Sprintf("\nSuccessfully registered %s", msg.data)
+	m.status.text = fmt.Sprintf("\nSuccessfully registered %s", msg.data.Domain+": "+msg.data.Username)
+	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionRegister, payload: msg.data})
+	m.redoHistory = nil
 	return m, nil
 }
 
@@ -419,6 +446,7 @@ func (m model) handleDelete(msg deleteMsg) (model, tea.Cmd) {
 	}
 	m.status.kind = statusSuccess
 	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionDelete, payload: msg.data})
+	m.redoHistory = nil
 	return m, listCmd(m.svc.dbQ)
 }
 
@@ -443,6 +471,15 @@ func (m model) handleRestore(msg restoreMsg) (model, tea.Cmd) {
 	return m, listCmd(m.svc.dbQ)
 }
 
+func (m model) handleRedelete(msg redeleteMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.status.text = msg.err.Error()
+		m.status.kind = statusError
+	}
+	m.status.kind = statusSuccess
+	m.status.text = "entry redelete successfully"
+	return m, listCmd(m.svc.dbQ)
+}
 func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
 	m.loginInput.Reset()
 	m.domainInput.Reset()
@@ -692,12 +729,39 @@ func (m model) ChoiceValidation() (item, bool) {
 	return m.choices[m.cursor], true
 }
 
-func (m *model) popUndo() (historyEntry, error) {
+func (m model) popUndo() (model, historyEntry, error) {
 	n := len(m.undoHistory)
 	if n <= 0 {
-		return historyEntry{}, fmt.Errorf("nothing to undo")
+		return m, historyEntry{}, fmt.Errorf("nothing to undo")
 	}
 	entry := m.undoHistory[n-1]
 	m.undoHistory = m.undoHistory[:len(m.undoHistory)-1]
-	return entry, nil
+
+	var reverseEntry historyEntry
+	switch entry.Kind {
+	case undoActionDelete:
+		reverseEntry = historyEntry{Kind: undoActionRegister, payload: entry.payload}
+	case undoActionRegister:
+		reverseEntry = historyEntry{Kind: undoActionDelete, payload: entry.payload}
+	}
+	m.redoHistory = append(m.redoHistory, reverseEntry)
+	return m, entry, nil
+}
+
+func (m model) popRedo() (model, historyEntry, error) {
+	n := len(m.redoHistory)
+	if n <= 0 {
+		return m, historyEntry{}, fmt.Errorf("nothing to redo")
+	}
+	entry := m.redoHistory[n-1]
+	m.redoHistory = m.redoHistory[:len(m.redoHistory)-1]
+	var reverseEntry historyEntry
+	switch entry.Kind {
+	case undoActionDelete:
+		reverseEntry = historyEntry{Kind: undoActionRegister, payload: entry.payload}
+	case undoActionRegister:
+		reverseEntry = historyEntry{Kind: undoActionDelete, payload: entry.payload}
+	}
+	m.undoHistory = append(m.undoHistory, reverseEntry)
+	return m, entry, nil
 }

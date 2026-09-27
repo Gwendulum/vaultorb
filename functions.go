@@ -10,9 +10,9 @@ import (
 	"vaultorb/internal/db"
 )
 
-func registerPassword(ctx context.Context, dbQ *db.Queries, args []string, masterKey []byte) (string, error) {
+func registerPassword(ctx context.Context, dbQ *db.Queries, args []string, masterKey []byte) (db.Entry, error) {
 	if len(args) != 3 {
-		return "", fmt.Errorf("new entry must include domain, username, and password\n")
+		return db.Entry{}, fmt.Errorf("new entry must include domain, username, and password\n")
 
 	}
 	domain := args[0]
@@ -21,7 +21,7 @@ func registerPassword(ctx context.Context, dbQ *db.Queries, args []string, maste
 
 	encryptedPassword, err := encrypt(masterKey, []byte(password))
 	if err != nil {
-		return "", fmt.Errorf("Register func: %w", err)
+		return db.Entry{}, fmt.Errorf("Register func: %w", err)
 	}
 	entry, err := dbQ.CreateEntry(ctx, db.CreateEntryParams{
 		Domain:            domain,
@@ -30,9 +30,9 @@ func registerPassword(ctx context.Context, dbQ *db.Queries, args []string, maste
 		CreatedAt:         time.Now().UTC(),
 	})
 	if err != nil {
-		return "", fmt.Errorf("error creating new entry: %v\n", err)
+		return db.Entry{}, fmt.Errorf("error creating new entry: %v\n", err)
 	}
-	return fmt.Sprintf("New password for %v: %v entry created successfully!\n", entry.Domain, entry.Username), nil
+	return entry, nil
 
 }
 
