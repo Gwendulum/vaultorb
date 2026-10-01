@@ -9,7 +9,7 @@ VALUES (
 RETURNING *;
 
 -- name: GetEntry :one
-SELECT encrypted_password
+SELECT *
 FROM entries
 WHERE domain = ?1 AND username = ?2;
 
@@ -37,4 +37,10 @@ VALUES (
 	?4,
     ?5
 )
+RETURNING *;
+
+-- name: UpdateEntry :one
+UPDATE entries
+SET encrypted_password = ?3
+WHERE domain = ?1 AND username = ?2
 RETURNING *;

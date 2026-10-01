@@ -80,7 +80,7 @@ func (q *Queries) DeleteEntry(ctx context.Context, arg DeleteEntryParams) (Entry
 }
 
 const getEntry = `-- name: GetEntry :one
-SELECT encrypted_password
+SELECT id, domain, username, encrypted_password, created_at
 FROM entries
 WHERE domain = ?1 AND username = ?2
 `
@@ -90,11 +90,17 @@ type GetEntryParams struct {
 	Username string
 }
 
-func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) ([]byte, error) {
+func (q *Queries) GetEntry(ctx context.Context, arg GetEntryParams) (Entry, error) {
 	row := q.db.QueryRowContext(ctx, getEntry, arg.Domain, arg.Username)
-	var encrypted_password []byte
-	err := row.Scan(&encrypted_password)
-	return encrypted_password, err
+	var i Entry
+	err := row.Scan(
+		&i.ID,
+		&i.Domain,
+		&i.Username,
+		&i.EncryptedPassword,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const listEntries = `-- name: ListEntries :many
@@ -160,6 +166,32 @@ func (q *Queries) RestoreEntry(ctx context.Context, arg RestoreEntryParams) (Ent
 		arg.EncryptedPassword,
 		arg.CreatedAt,
 	)
+	var i Entry
+	err := row.Scan(
+		&i.ID,
+		&i.Domain,
+		&i.Username,
+		&i.EncryptedPassword,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const updateEntry = `-- name: UpdateEntry :one
+UPDATE entries
+SET encrypted_password = ?3
+WHERE domain = ?1 AND username = ?2
+RETURNING id, domain, username, encrypted_password, created_at
+`
+
+type UpdateEntryParams struct {
+	Domain            string
+	Username          string
+	EncryptedPassword []byte
+}
+
+func (q *Queries) UpdateEntry(ctx context.Context, arg UpdateEntryParams) (Entry, error) {
+	row := q.db.QueryRowContext(ctx, updateEntry, arg.Domain, arg.Username, arg.EncryptedPassword)
 	var i Entry
 	err := row.Scan(
 		&i.ID,

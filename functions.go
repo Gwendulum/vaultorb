@@ -42,14 +42,14 @@ func getPassword(ctx context.Context, dbQ *db.Queries, args []string, masterKey 
 	}
 	domain := args[0]
 	username := args[1]
-	password, err := dbQ.GetEntry(ctx, db.GetEntryParams{
+	entry, err := dbQ.GetEntry(ctx, db.GetEntryParams{
 		Domain:   domain,
 		Username: username,
 	})
 	if err != nil {
 		return "", fmt.Errorf("error retrieving password\n")
 	}
-	decryptedPassword, err := decrypt(masterKey, password)
+	decryptedPassword, err := decrypt(masterKey, entry.EncryptedPassword)
 	return string(decryptedPassword), nil
 
 }
@@ -79,6 +79,45 @@ func deletePassword(ctx context.Context, dbQ *db.Queries, args []string) (db.Ent
 		return db.Entry{}, fmt.Errorf("error deleting entry\n")
 	}
 	return entry, nil
+}
+
+func updatePassword(ctx context.Context, dbQ *db.Queries, password string, args []string, masterKey []byte) (db.Entry, error) {
+	if len(args) != 2 {
+		return db.Entry{}, fmt.Errorf("Update requires domain and username\n")
+	}
+	domain := args[0]
+	username := args[1]
+	newEncryptedPassword, err := encrypt(masterKey, []byte(password))
+	if err != nil {
+		return db.Entry{}, fmt.Errorf("Update failed: %w", err)
+	}
+	newEntry, err := dbQ.UpdateEntry(ctx, db.UpdateEntryParams{
+		Domain:            domain,
+		Username:          username,
+		EncryptedPassword: newEncryptedPassword,
+	})
+	if err != nil {
+		return db.Entry{}, fmt.Errorf("UpdateEntry failed: %w", err)
+	}
+	return newEntry, nil
+}
+
+func getEntry(ctx context.Context, dbQ *db.Queries, args []string, masterKey []byte) (db.Entry, error) {
+	if len(args) != 2 {
+		return db.Entry{}, fmt.Errorf("Get requires domain and username\n")
+	}
+	domain := args[0]
+	username := args[1]
+
+	entry, err := dbQ.GetEntry(ctx, db.GetEntryParams{
+		Domain:   domain,
+		Username: username,
+	})
+	if err != nil {
+		return db.Entry{}, fmt.Errorf("UpdateEntry failed: %w", err)
+	}
+	return entry, nil
+
 }
 
 func generatePassword(svc services) (string, error) {

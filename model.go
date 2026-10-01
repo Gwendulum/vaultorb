@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"vaultorb/internal/db"
@@ -19,6 +21,7 @@ const (
 	screenGet
 	screenList
 	screenDelete
+	screenCreateMasterPassword
 )
 
 type statusType int
@@ -63,12 +66,15 @@ func (l listEntry) Title() string {
 type historyEntry struct {
 	Kind    undoActionType
 	payload db.Entry
+	isUndo  bool
 }
+
 type model struct {
 	activeScreen  currentScreen
 	masterKey     []byte
 	choices       []item
 	cursor        int
+	editingIndex  int
 	loginInput    textinput.Model
 	domainInput   textinput.Model
 	usernameInput textinput.Model
@@ -79,6 +85,30 @@ type model struct {
 	status        statusMessage
 	undoHistory   []historyEntry
 	redoHistory   []historyEntry
+}
+
+type checkInitialRunMsg struct {
+	isInitialized bool
+	err           error
+}
+
+func checkInitialRunCmd(dbQ *db.Queries) tea.Cmd {
+	return func() tea.Msg {
+		var isInit bool
+		ctx := context.Background()
+		_, err := dbQ.GetMetadata(ctx, "vault_check")
+		if err != nil {
+			//Guard clause. If this fails the error is something else than a missing encrypted phrase and we return early.
+			if !errors.Is(err, sql.ErrNoRows) {
+				return checkInitialRunMsg{err: err}
+			}
+			isInit = false
+		} else {
+			isInit = true
+		}
+
+		return checkInitialRunMsg{isInitialized: isInit}
+	}
 }
 
 func initialModel(svc services) model {
@@ -99,6 +129,7 @@ func initialModel(svc services) model {
 		activeScreen:  screenLogin,
 		masterKey:     nil,
 		cursor:        0,
+		editingIndex:  -1,
 		loginInput:    login,
 		domainInput:   dom,
 		usernameInput: usr,
@@ -182,6 +213,24 @@ func deleteCmd(dbQ *db.Queries, domUser string) tea.Cmd {
 	}
 }
 
+type updateMsg cmdMsg[db.Entry]
+
+func updateCmd(dbQ *db.Queries, domUser string, newPassword string, masterKey []byte) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		splitString := strings.Fields(domUser)
+		oldEntry, err := getEntry(ctx, dbQ, splitString, masterKey)
+		if err != nil {
+			return updateMsg{err: err}
+		}
+		_, err = updatePassword(ctx, dbQ, newPassword, splitString, masterKey)
+		if err != nil {
+			return updateMsg{err: err}
+		}
+		return updateMsg{data: oldEntry}
+	}
+}
+
 type generateMsg cmdMsg[string]
 
 func generateCmd(svc services) tea.Cmd {
@@ -194,7 +243,7 @@ func generateCmd(svc services) tea.Cmd {
 	}
 }
 
-type restoreMsg cmdMsg[db.Entry]
+type restoreMsg cmdMsg[historyEntry]
 
 func restoreCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
 	return func() tea.Msg {
@@ -209,11 +258,12 @@ func restoreCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
 		if err != nil {
 			return restoreMsg{err: err}
 		}
-		return restoreMsg{data: restoredRow}
+		entry.payload = restoredRow
+		return restoreMsg{data: entry}
 	}
 }
 
-type redeleteMsg cmdMsg[db.Entry]
+type redeleteMsg cmdMsg[historyEntry]
 
 func redeleteCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
 	return func() tea.Msg {
@@ -225,17 +275,47 @@ func redeleteCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
 		if err != nil {
 			return redeleteMsg{err: err}
 		}
-		return redeleteMsg{data: deletedEntry}
+		entry.payload = deletedEntry
+		return redeleteMsg{data: entry}
+	}
+}
+
+type restoreUpdateMsg cmdMsg[historyEntry]
+
+func restoreUpdateCmd(dbQ *db.Queries, entry historyEntry) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		dbRow, err := dbQ.GetEntry(ctx, db.GetEntryParams{
+			Domain:   entry.payload.Domain,
+			Username: entry.payload.Username,
+		})
+		if err != nil {
+			return restoreUpdateMsg{err: err}
+		}
+		_, err = dbQ.UpdateEntry(ctx, db.UpdateEntryParams{
+			Domain:            entry.payload.Domain,
+			Username:          entry.payload.Username,
+			EncryptedPassword: entry.payload.EncryptedPassword,
+		})
+		if err != nil {
+			return restoreUpdateMsg{err: err}
+		}
+		entry.payload = dbRow
+		return restoreUpdateMsg{data: entry}
 	}
 }
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	var cmds []tea.Cmd
+	cmds = append(cmds, textinput.Blink)
+	cmds = append(cmds, checkInitialRunCmd(m.svc.dbQ))
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
-
+	case checkInitialRunMsg:
+		return m.handleCheckInitialRun(msg)
 	case authMsg:
 		return m.handleAuth(msg)
 	case getMsg:
@@ -246,12 +326,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleList(msg)
 	case deleteMsg:
 		return m.handleDelete(msg)
+	case updateMsg:
+		return m.handleUpdate(msg)
 	case generateMsg:
 		return m.handleGenerate(msg)
 	case restoreMsg:
 		return m.handleRestore(msg)
 	case redeleteMsg:
 		return m.handleRedelete(msg)
+	case restoreUpdateMsg:
+		return m.handleRestoreUpdate(msg)
 	}
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		return m, tea.Quit
@@ -271,16 +355,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status.text = err.Error()
 			return m, nil
 		}
-
 		switch entry.Kind {
 		case undoActionDelete:
 			return m, restoreCmd(m.svc.dbQ, entry)
 		case undoActionRegister:
 			return m, redeleteCmd(m.svc.dbQ, entry)
 		case undoActionUpdate:
+			return m, restoreUpdateCmd(m.svc.dbQ, entry)
 		}
 	}
 	switch m.activeScreen {
+
+	case screenCreateMasterPassword:
+		return m.updateScreenCreateMasterPassword(msg)
 
 	case screenLogin:
 		return m.updateScreenLogin(msg)
@@ -307,6 +394,14 @@ func (m model) View() tea.View {
 	s := "VaultOrb CLI\n\n"
 
 	switch m.activeScreen {
+	case screenCreateMasterPassword:
+
+		if m.status.kind == statusError {
+			s += "something went wrong\n\n"
+		}
+		s += "Create your master password\n"
+		s += fmt.Sprintf("%v", m.loginInput.View())
+
 	case screenLogin:
 		if m.status.kind == statusError {
 			s += "wrong password\n\n"
@@ -356,7 +451,11 @@ func (m model) View() tea.View {
 				s += "   | "
 			}
 
-			s += fmt.Sprintf("%s\n", entry.Title())
+			s += fmt.Sprintf("%s", entry.Title())
+			if m.editingIndex == i {
+				s += m.passwordInput.View()
+			}
+			s += "\n"
 		}
 		switch m.status.kind {
 		case statusSuccess:
@@ -379,7 +478,22 @@ func (m model) View() tea.View {
 	v.AltScreen = true
 	return v
 }
+func (m model) handleCheckInitialRun(msg checkInitialRunMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.status.text = msg.err.Error()
+		m.status.kind = statusError
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.status.kind = statusSuccess
+	if msg.isInitialized == false {
+		m, cmd = m.switchScreen(screenCreateMasterPassword)
+	} else {
+		m, cmd = m.switchScreen(screenLogin)
+	}
+	return m, cmd
 
+}
 func (m model) handleAuth(msg authMsg) (model, tea.Cmd) {
 	m.loginInput.Reset()
 	if msg.err != nil {
@@ -414,8 +528,11 @@ func (m model) handleReg(msg regMsg) (model, tea.Cmd) {
 	}
 	m.status.kind = statusSuccess
 	m.status.text = fmt.Sprintf("\nSuccessfully registered %s", msg.data.Domain+": "+msg.data.Username)
-	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionRegister, payload: msg.data})
+	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionRegister, payload: msg.data, isUndo: true})
 	m.redoHistory = nil
+	m.domainInput.Reset()
+	m.usernameInput.Reset()
+	m.passwordInput.Reset()
 	return m, nil
 }
 
@@ -445,7 +562,22 @@ func (m model) handleDelete(msg deleteMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	m.status.kind = statusSuccess
-	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionDelete, payload: msg.data})
+	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionDelete, payload: msg.data, isUndo: true})
+	m.redoHistory = nil
+	return m, listCmd(m.svc.dbQ)
+}
+
+func (m model) handleUpdate(msg updateMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.status.text = msg.err.Error()
+		m.status.kind = statusError
+		return m, nil
+	}
+	m.status.kind = statusSuccess
+	m.status.text = "Password updated successfully"
+	m.editingIndex = -1
+	m.passwordInput.SetValue("")
+	m.undoHistory = append(m.undoHistory, historyEntry{Kind: undoActionUpdate, payload: msg.data, isUndo: true})
 	m.redoHistory = nil
 	return m, listCmd(m.svc.dbQ)
 }
@@ -465,9 +597,27 @@ func (m model) handleRestore(msg restoreMsg) (model, tea.Cmd) {
 	if msg.err != nil {
 		m.status.text = msg.err.Error()
 		m.status.kind = statusError
+		return m, nil
 	}
 	m.status.kind = statusSuccess
-	m.status.text = "entry restored successfully"
+
+	if msg.data.isUndo {
+		newRedoEntry := historyEntry{
+			Kind:    undoActionRegister,
+			payload: msg.data.payload,
+			isUndo:  false,
+		}
+		m.redoHistory = append(m.redoHistory, newRedoEntry)
+		m.status.text = "Undo: Entry restored successfully"
+	} else {
+		newUndoEntry := historyEntry{
+			Kind:    undoActionRegister,
+			payload: msg.data.payload,
+			isUndo:  true,
+		}
+		m.undoHistory = append(m.undoHistory, newUndoEntry)
+		m.status.text = "Redo: Entry restored successfully"
+	}
 	return m, listCmd(m.svc.dbQ)
 }
 
@@ -475,17 +625,67 @@ func (m model) handleRedelete(msg redeleteMsg) (model, tea.Cmd) {
 	if msg.err != nil {
 		m.status.text = msg.err.Error()
 		m.status.kind = statusError
+		return m, nil
 	}
 	m.status.kind = statusSuccess
-	m.status.text = "entry redelete successfully"
+	if msg.data.isUndo {
+		newRedoEntry := historyEntry{
+			Kind:    undoActionDelete,
+			payload: msg.data.payload,
+			isUndo:  false,
+		}
+		m.redoHistory = append(m.redoHistory, newRedoEntry)
+		m.status.text = "Undo: Entry redeleted successfully"
+	} else {
+		newUndoEntry := historyEntry{
+			Kind:    undoActionDelete,
+			payload: msg.data.payload,
+			isUndo:  true,
+		}
+		m.undoHistory = append(m.undoHistory, newUndoEntry)
+		m.status.text = "Redo: Entry redeleted successfully"
+	}
+	return m, listCmd(m.svc.dbQ)
+}
+
+func (m model) handleRestoreUpdate(msg restoreUpdateMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.status.text = msg.err.Error()
+		m.status.kind = statusError
+		return m, nil
+	}
+	if msg.data.isUndo {
+		newRedoEntry := historyEntry{
+			Kind:    undoActionUpdate,
+			payload: msg.data.payload,
+			isUndo:  false,
+		}
+		m.redoHistory = append(m.redoHistory, newRedoEntry)
+		m.status.text = "Undo: Entry reupdated successfully"
+	} else {
+		newUndoEntry := historyEntry{
+			Kind:    undoActionUpdate,
+			payload: msg.data.payload,
+			isUndo:  true,
+		}
+		m.undoHistory = append(m.undoHistory, newUndoEntry)
+		m.status.text = "Redo: Entry reupdated successfully"
+	}
+
+	m.status.kind = statusSuccess
+
 	return m, listCmd(m.svc.dbQ)
 }
 func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
 	m.loginInput.Reset()
 	m.domainInput.Reset()
 	m.usernameInput.Reset()
+	m.passwordInput.Reset()
+
+	m.loginInput.Blur()
 	m.domainInput.Blur()
 	m.usernameInput.Blur()
+	m.passwordInput.Blur()
 
 	m.cursor = 0
 	m.focusIndex = 0
@@ -495,7 +695,7 @@ func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	switch screen {
-	case screenLogin:
+	case screenLogin, screenCreateMasterPassword:
 		cmd = m.loginInput.Focus()
 	case screenDashboard:
 		m.choices = []item{
@@ -508,6 +708,20 @@ func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
 		cmd = m.domainInput.Focus()
 	}
 
+	return m, cmd
+}
+
+func (m model) updateScreenCreateMasterPassword(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if keyMsg.String() == "enter" {
+			password := m.loginInput.Value()
+			m.loginInput.Reset()
+			return m, authenticateCmd(m.svc.dbQ, password)
+		}
+	}
+	m.loginInput, cmd = m.loginInput.Update(msg)
 	return m, cmd
 }
 
@@ -651,6 +865,42 @@ func (m model) updateScreenRegister(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateScreenList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
+	if m.editingIndex >= 0 {
+		var cmds []tea.Cmd
+		var inputCmd tea.Cmd
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			switch keyMsg.String() {
+			case "esc":
+				m.editingIndex = -1
+				m.passwordInput.SetValue("")
+				return m, nil
+			case "ctrl+g":
+				cmds = append(cmds, generateCmd(m.svc))
+				return m, tea.Batch(cmds...)
+			case "enter":
+				if m.passwordInput.Value() == "" {
+					m.status.kind = statusError
+					m.status.text = "password cannot be empty"
+					return m, nil
+				}
+				passwordValidation := strings.Fields(m.passwordInput.Value())
+				if len(passwordValidation) > 1 {
+					m.status.kind = statusError
+					m.status.text = "password cannot have spaces"
+					return m, nil
+				}
+
+				entryItem := m.choices[m.cursor]
+				return m, updateCmd(m.svc.dbQ, entryItem.Title(), m.passwordInput.Value(), m.masterKey)
+
+			}
+
+		}
+		m.passwordInput, inputCmd = m.passwordInput.Update(msg)
+		cmds = append(cmds, inputCmd)
+		return m, tea.Batch(cmds...)
+	}
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		m.status.text = ""
 		m.status.kind = statusNone
@@ -675,6 +925,15 @@ func (m model) updateScreenList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+d":
 			if entry, ok := m.ChoiceValidation(); ok {
 				return m, deleteCmd(m.svc.dbQ, entry.Title())
+			}
+		case "ctrl+u":
+			if _, ok := m.ChoiceValidation(); ok {
+				m.editingIndex = m.cursor
+				m.focusIndex = 2
+				m.domainInput.Blur()
+				m.usernameInput.Blur()
+				cmd = m.passwordInput.Focus()
+				return m, cmd
 			}
 		}
 	}
@@ -735,16 +994,12 @@ func (m model) popUndo() (model, historyEntry, error) {
 		return m, historyEntry{}, fmt.Errorf("nothing to undo")
 	}
 	entry := m.undoHistory[n-1]
-	m.undoHistory = m.undoHistory[:len(m.undoHistory)-1]
 
-	var reverseEntry historyEntry
-	switch entry.Kind {
-	case undoActionDelete:
-		reverseEntry = historyEntry{Kind: undoActionRegister, payload: entry.payload}
-	case undoActionRegister:
-		reverseEntry = historyEntry{Kind: undoActionDelete, payload: entry.payload}
+	m.undoHistory = m.undoHistory[:len(m.undoHistory)-1]
+	if !entry.isUndo {
+		return m, historyEntry{}, fmt.Errorf("redo entry on undo stack")
 	}
-	m.redoHistory = append(m.redoHistory, reverseEntry)
+
 	return m, entry, nil
 }
 
@@ -754,14 +1009,10 @@ func (m model) popRedo() (model, historyEntry, error) {
 		return m, historyEntry{}, fmt.Errorf("nothing to redo")
 	}
 	entry := m.redoHistory[n-1]
+
 	m.redoHistory = m.redoHistory[:len(m.redoHistory)-1]
-	var reverseEntry historyEntry
-	switch entry.Kind {
-	case undoActionDelete:
-		reverseEntry = historyEntry{Kind: undoActionRegister, payload: entry.payload}
-	case undoActionRegister:
-		reverseEntry = historyEntry{Kind: undoActionDelete, payload: entry.payload}
+	if entry.isUndo {
+		return m, historyEntry{}, fmt.Errorf("undo entry on redo stack")
 	}
-	m.undoHistory = append(m.undoHistory, reverseEntry)
 	return m, entry, nil
 }

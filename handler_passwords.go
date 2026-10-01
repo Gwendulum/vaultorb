@@ -47,16 +47,16 @@ func handlerGet(s *state, cmd command) error {
 	domain := cmd.Args[0]
 	username := cmd.Args[1]
 
-	password, err := s.db.GetEntry(context.Background(), db.GetEntryParams{
+	entry, err := s.db.GetEntry(context.Background(), db.GetEntryParams{
 		Domain:   domain,
 		Username: username,
 	})
 	if err != nil {
 		return fmt.Errorf("error retrieving password\n")
 	}
-	encryptedPassword := base64.StdEncoding.EncodeToString(password)
+	encryptedPassword := base64.StdEncoding.EncodeToString(entry.EncryptedPassword)
 	fmt.Printf("encrypted: %s\n", string(encryptedPassword))
-	decryptedPassword, err := decrypt(s.masterKey, password)
+	decryptedPassword, err := decrypt(s.masterKey, entry.EncryptedPassword)
 	fmt.Printf("password for %s: %s is: %v\n", domain, username, string(decryptedPassword))
 	return nil
 
