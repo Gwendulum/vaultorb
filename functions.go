@@ -30,7 +30,7 @@ func registerPassword(ctx context.Context, dbQ *db.Queries, args []string, maste
 		CreatedAt:         time.Now().UTC(),
 	})
 	if err != nil {
-		return db.Entry{}, fmt.Errorf("error creating new entry: %v\n", err)
+		return db.Entry{}, err
 	}
 	return entry, nil
 

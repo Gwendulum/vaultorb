@@ -20,7 +20,7 @@ func (q *Queries) ClearEntries(ctx context.Context) error {
 }
 
 const createEntry = `-- name: CreateEntry :one
-INSERT INTO entries (domain, username, encrypted_password, created_at)
+INSERT OR IGNORE INTO entries (domain, username, encrypted_password, created_at)
 VALUES (
     ?1,
     ?2,

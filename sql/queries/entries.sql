@@ -1,12 +1,12 @@
 -- name: CreateEntry :one
-INSERT INTO entries (domain, username, encrypted_password, created_at)
+INSERT OR IGNORE INTO entries (domain, username, encrypted_password, created_at)
 VALUES (
     ?1,
     ?2,
     ?3,
 	?4
 )
-RETURNING *;
+RETURNING id, domain, username, encrypted_password, created_at;
 
 -- name: GetEntry :one
 SELECT *

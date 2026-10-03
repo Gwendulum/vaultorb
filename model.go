@@ -28,6 +28,11 @@ const (
 	statusError
 )
 
+type statusMessage struct {
+	text string
+	kind statusType
+}
+
 type undoActionType int
 
 const (
@@ -35,11 +40,6 @@ const (
 	undoActionUpdate
 	undoActionDelete
 )
-
-type statusMessage struct {
-	text string
-	kind statusType
-}
 
 type item interface {
 	Title() string
@@ -65,22 +65,29 @@ type historyEntry struct {
 	isUndo  bool
 }
 
+type updateBuffer struct {
+	payload  db.Entry
+	password string
+}
+
 type model struct {
-	activeScreen  currentScreen
-	masterKey     []byte
-	choices       []item
-	cursor        int
-	editingIndex  int
-	loginInput    textinput.Model
-	domainInput   textinput.Model
-	usernameInput textinput.Model
-	passwordInput textinput.Model
-	focusIndex    int
-	svc           services
-	password      string
-	status        statusMessage
-	undoHistory   []historyEntry
-	redoHistory   []historyEntry
+	activeScreen       currentScreen
+	masterKey          []byte
+	choices            []item
+	cursor             int
+	editingIndex       int
+	loginInput         textinput.Model
+	domainInput        textinput.Model
+	usernameInput      textinput.Model
+	passwordInput      textinput.Model
+	focusIndex         int
+	svc                services
+	password           string
+	status             statusMessage
+	undoHistory        []historyEntry
+	redoHistory        []historyEntry
+	updateBuffer       updateBuffer
+	updateConfirmation bool
 }
 
 func initialModel(svc services) model {
@@ -129,6 +136,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleGet(msg)
 	case regMsg:
 		return m.handleReg(msg)
+	case regUpdateMsg:
+		return m.handleRegUpdate(msg)
 	case listMsg:
 		return m.handleList(msg)
 	case deleteMsg:
@@ -246,6 +255,9 @@ func (m model) View() tea.View {
 			s += fmt.Sprintf("error: %v", m.status.text)
 		}
 		s += m.status.text + "\n"
+		if m.updateConfirmation {
+			s += "press enter to update to new password or escape to cancel\n"
+		}
 
 	case screenList:
 		s += "list\n"
@@ -287,17 +299,6 @@ func (m model) View() tea.View {
 }
 
 // helper functions
-func (m model) ChoiceValidation() (item, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.choices) {
-		m.status.text = "Invalid selection"
-		m.status.kind = statusError
-		return nil, false
-	}
-	m.status.text = ""
-	m.status.kind = statusNone
-	return m.choices[m.cursor], true
-}
-
 func (m model) popUndo() (model, historyEntry, error) {
 	n := len(m.undoHistory)
 	if n <= 0 {

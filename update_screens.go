@@ -103,6 +103,26 @@ func (m model) updateScreenGet(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateScreenRegister(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	if m.updateConfirmation {
+
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			m.status.text = ""
+			m.status.kind = statusNone
+			switch keyMsg.String() {
+			case "enter":
+				domUser := m.updateBuffer.payload.Domain + " " + m.updateBuffer.payload.Username
+				password := m.updateBuffer.password
+				m.updateBuffer = updateBuffer{}
+				m.updateConfirmation = false
+				return m, updateCmd(m.svc.dbQ, domUser, password, m.masterKey)
+			case "esc":
+				m.updateBuffer = updateBuffer{}
+				m.updateConfirmation = false
+				return m, nil
+			}
+			return m, nil
+		}
+	}
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		m.status.text = ""
 		m.status.kind = statusNone
@@ -305,4 +325,15 @@ func (m model) switchScreen(screen currentScreen) (model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+func (m model) ChoiceValidation() (item, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.choices) {
+		m.status.text = "Invalid selection"
+		m.status.kind = statusError
+		return nil, false
+	}
+	m.status.text = ""
+	m.status.kind = statusNone
+	return m.choices[m.cursor], true
 }
